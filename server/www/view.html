@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Preview build log</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f8fa; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0;
+          --run: #9a6700; --ok: #1a7f37; --bad: #d1242f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #30363d;
+            --run: #d29922; --ok: #3fb950; --bad: #f85149; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  header { position: sticky; top: 0; display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center;
+           padding: .75rem 1rem; background: var(--bg); border-bottom: 1px solid var(--line); }
+  h1 { font-size: 1rem; margin: 0; }
+  #state { font-weight: 600; }
+  #state.running { color: var(--run); } #state.ok { color: var(--ok); } #state.bad { color: var(--bad); }
+  header a { color: inherit; } .spacer { flex: 1; } label { color: var(--muted); }
+  pre { margin: 0; padding: 1rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+        font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Preview build log</h1>
+  <span id="state" class="running">loading…</span>
+  <span class="spacer"></span>
+  <label><input type="checkbox" id="follow" checked> follow</label>
+  <a id="raw" href="#">raw</a>
+  <a id="preview" href="#" hidden>open preview →</a>
+</header>
+<pre id="log"></pre>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const pr = q.get("pr") || "", name = q.get("log") || "latest.log";
+  const $ = id => document.getElementById(id);
+  if (!/^\d+$/.test(pr) || !/^(latest|\d{8}T\d{6}Z-[0-9a-f]{7})\.log$/.test(name)) {
+    $("state").textContent = "invalid link"; $("state").className = "bad"; return;
+  }
+  const url = `${pr}/${name}`;
+  $("title").textContent = `PR #${pr} · ${name}`;
+  $("raw").href = url;
+  $("preview").href = `../${pr}/`;
+
+  const ansi = /\x1b\[[0-9;?]*[A-Za-z]/g;
+  const decoder = new TextDecoder();
+  let offset = 0, text = "";
+
+  function finished() {
+    const m = text.match(/^### (DONE|FAILED|CANCELLED).*$/m);
+    if (!m) return false;
+    const ok = m[1] === "DONE";
+    $("state").textContent = ok ? "✅ done" : m[0].slice(4);
+    $("state").className = ok ? "ok" : "bad";
+    $("preview").hidden = !ok;
+    return true;
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch(url, { cache: "no-store", headers: offset ? { Range: `bytes=${offset}-` } : {} });
+      if (res.status === 200 || res.status === 206) {
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (res.status === 200) { offset = 0; text = ""; }
+        offset += buf.length;
+        text += decoder.decode(buf, { stream: true });
+        $("log").textContent = text.replace(ansi, "");
+        if ($("follow").checked) window.scrollTo(0, document.body.scrollHeight);
+      } else if (res.status !== 416) {  // 416 = no new bytes yet
+        $("state").textContent = `log not available (HTTP ${res.status})`; $("state").className = "bad";
+        return;
+      }
+      if (finished()) return;
+      $("state").textContent = "🔨 building…"; $("state").className = "running";
+    } catch (e) {
+      $("state").textContent = "connection lost, retrying…";
+    }
+    setTimeout(poll, 2000);
+  }
+  poll();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Build or remove the preview of one pull request.
+#
+#   pr-preview deploy <pr-number> <commit-sha>
+#   pr-preview remove <pr-number>
+#
+# Normally invoked by pr_preview_hook.py, which passes the settings below as
+# environment variables. All output goes to stdout/stderr (the build log).
+set -euo pipefail
+
+: "${REPO_URL:?REPO_URL is not set}"
+: "${PREVIEW_BASE_URL:?PREVIEW_BASE_URL is not set}"
+PREVIEW_ROOT=${PREVIEW_ROOT:-/var/www/previews}
+WORK_ROOT=${WORK_ROOT:-/srv/pr-preview}
+OUTPUT_DIR=${OUTPUT_DIR:-_site}
+PRE_RENDER=${PRE_RENDER-}
+
+die() { echo "error: $*" >&2; exit 2; }
+step() { printf '\n==> %s\n' "$*"; }
+
+cmd=${1:-}
+pr=${2:-}
+[[ $pr =~ ^[0-9]{1,7}$ ]] || die "invalid PR number: '$pr'"
+
+mirror=$WORK_ROOT/repo.git
+work=$WORK_ROOT/work/$pr
+site=$PREVIEW_ROOT/$pr
+mkdir -p "$WORK_ROOT/locks" "$WORK_ROOT/work"
+
+# One build per PR at a time; the shared mirror has its own lock (fd 8).
+exec 9>"$WORK_ROOT/locks/$pr.lock"
+flock 9
+
+do_deploy() {
+  local sha=$1
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || die "invalid commit sha: '$sha'"
+  local url="${PREVIEW_BASE_URL%/}/$pr/"
+
+  step "Fetching PR #$pr at ${sha:0:7}"
+  (
+    flock 8
+    [ -d "$mirror" ] || git clone --bare --quiet "$REPO_URL" "$mirror"
+    git -C "$mirror" fetch --quiet --force origin "+refs/pull/$pr/head:refs/pull/$pr/head"
+    git -C "$mirror" merge-base --is-ancestor "$sha" "refs/pull/$pr/head" 2>/dev/null \
+      || die "commit $sha is not part of pull/$pr/head"
+    git -C "$mirror" worktree prune
+    if [ -e "$work/.git" ]; then
+      git -C "$work" checkout --quiet --force --detach "$sha"
+    else
+      rm -rf "$work"
+      git -C "$mirror" worktree add --quiet --force --detach "$work" "$sha"
+    fi
+  ) 8>"$WORK_ROOT/locks/mirror.lock"
+  git -C "$work" clean -ffdxq
+  git -C "$work" log -1 --format='    %h %s (%an, %ad)' --date=short
+  cd "$work"
+
+  if [ -n "$PRE_RENDER" ]; then
+    step "Pre-render: $PRE_RENDER"
+    bash -c "$PRE_RENDER"
+  fi
+
+  # A Quarto profile that points site-url (sitemap, feeds, canonical links) at the preview.
+  cat > _quarto-pr-preview.yml <<EOF
+website:
+  site-url: "$url"
+EOF
+
+  step "quarto render"
+  QUARTO_PROFILE=pr-preview quarto render
+  [ -d "$OUTPUT_DIR" ] || die "render did not produce $OUTPUT_DIR/"
+
+  step "Publishing to $site"
+  local tmp=$PREVIEW_ROOT/.$pr.new old=$PREVIEW_ROOT/.$pr.old
+  rm -rf "$tmp" "$old"
+  rsync -a --delete "$OUTPUT_DIR/" "$tmp/"
+  chmod -R a+rX "$tmp"
+  [ ! -e "$site" ] || mv "$site" "$old"
+  mv "$tmp" "$site"
+  rm -rf "$old"
+
+  step "Deployed: $url"
+}
+
+do_remove() {
+  step "Removing preview of PR #$pr"
+  rm -rf "$site" "$PREVIEW_ROOT/.$pr.new" "$PREVIEW_ROOT/.$pr.old"
+  (
+    flock 8
+    if [ -d "$mirror" ]; then
+      git -C "$mirror" worktree remove --force "$work" 2>/dev/null || true
+      git -C "$mirror" update-ref -d "refs/pull/$pr/head" 2>/dev/null || true
+      git -C "$mirror" worktree prune
+    fi
+  ) 8>"$WORK_ROOT/locks/mirror.lock"
+  rm -rf "$work"
+  echo "done"
+}
+
+case $cmd in
+  deploy) do_deploy "${3:-}" ;;
+  remove) do_remove ;;
+  *) die "usage: pr-preview deploy <pr> <sha> | pr-preview remove <pr>" ;;
+esac
