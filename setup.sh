@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Prepare an Ubuntu (24.04+) host for the rootless PR preview container: Podman, the
-# "preview" user that runs it, nginx (+ TLS), directories, the image and the quadlet.
-# Run it from a checkout of this repository, e.g. /opt/pr-preview. Safe to re-run: it
-# keeps config.env and the nginx site, rebuilds the image and restarts the service.
+# "preview" user that runs it, the nginx site, directories, the image and the quadlet.
+# TLS is not handled here. Run it from a checkout of this repository, e.g.
+# /opt/pr-preview. Safe to re-run: it keeps config.env and the nginx site, rebuilds the
+# image and restarts the service.
 #
-#   sudo PREVIEW_HOST=previews.example.org CERTBOT_EMAIL=you@example.org ./setup.sh
+#   sudo PREVIEW_HOST=previews.example.org ./setup.sh
 #
-# PREVIEW_HOST is only needed on the first run. CERTBOT_EMAIL unset = skip TLS.
+# PREVIEW_HOST is only needed on the first run.
 set -euo pipefail
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
@@ -17,7 +18,7 @@ need_host() { : "${PREVIEW_HOST:?set PREVIEW_HOST, e.g. PREVIEW_HOST=previews.ex
 
 echo "==> Packages"
 apt-get update -q
-apt-get install -y -q nginx certbot python3-certbot-nginx openssl podman uidmap
+apt-get install -y -q nginx openssl podman uidmap
 version=$(podman --version | awk '{print $3}')
 dpkg --compare-versions "$version" ge 4.4 || { echo "Podman $version is too old for quadlets (need 4.4+)" >&2; exit 1; }
 
@@ -57,16 +58,10 @@ if [ ! -f "$conf" ]; then
   sed "s|PREVIEW_HOST|$PREVIEW_HOST|" "$here/nginx/pr-previews.conf" > "$conf"
   ln -sf "$conf" /etc/nginx/sites-enabled/pr-previews
 else
-  echo "    keeping existing $conf (certbot may have edited it)"
+  echo "    keeping existing $conf"
 fi
 nginx -t
 systemctl reload nginx
-
-if [ -n "${CERTBOT_EMAIL:-}" ]; then
-  echo "==> TLS certificate"
-  need_host
-  certbot --nginx -d "$PREVIEW_HOST" --non-interactive --agree-tos -m "$CERTBOT_EMAIL" --redirect
-fi
 
 echo "==> Image"
 "$here/previewctl" build

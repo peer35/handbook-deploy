@@ -41,7 +41,7 @@ capabilities and sets `no-new-privileges`.
 | `Containerfile` | Image: Python 3.12, Quarto (`QUARTO_VERSION`), git, rsync, the app. Target `test` runs the tests. |
 | `deploy/pr-preview.container` | Podman quadlet: the systemd user service that runs the container, with its hardening, mounts and port |
 | `previewctl` | Build, test, start/stop and logs, run as the `preview` user |
-| `setup.sh` | Host setup: Podman, the `preview` user, nginx, certbot, directories, `config.env`, image, quadlet |
+| `setup.sh` | Host setup: Podman, the `preview` user, nginx site, directories, `config.env`, image, quadlet |
 | `pr_preview/web.py` | Flask app: the webhook endpoint |
 | `pr_preview/previewer.py` | Job queue, cancelling superseded builds, PR comment, reconcile loop |
 | `pr_preview/github.py` | GitHub REST calls: token or GitHub App authentication |
@@ -68,22 +68,26 @@ container user (uid 10001) to `preview`.
 
 **Requirements:** Ubuntu 24.04 or newer. Quadlets need Podman 4.4+, and Ubuntu 24.04 ships 4.9.
 
-### 1. DNS
-Point a hostname (for example `previews.example.org`) at the server, and open ports 80 and 443.
+### 1. DNS and TLS
+Point a hostname (for example `previews.example.org`) at the server. TLS is not set up by
+this repository. Provide it the way your environment handles certificates, either in
+front of nginx or in the `pr-previews` nginx site. GitHub must reach the webhook URL over
+HTTPS.
 
 ### 2. Server
 Clone this repository on the server and run the setup script:
 
 ```bash
 sudo git clone <this repo> /opt/pr-preview && cd /opt/pr-preview
-sudo PREVIEW_HOST=previews.example.org CERTBOT_EMAIL=you@example.org ./setup.sh
+sudo PREVIEW_HOST=previews.example.org ./setup.sh
 ```
 
 The script:
-1. Installs Podman, nginx and certbot.
+1. Installs Podman and nginx.
 2. Creates the `preview` user, with subordinate uids and lingering enabled so its
    services start at boot.
-3. Creates the directories, the nginx site and the TLS certificate.
+3. Creates the directories and the nginx site (`/etc/nginx/sites-available/pr-previews`,
+   listening on port 80).
 4. Writes a `config.env` with a random webhook secret.
 5. Builds the image (this downloads Quarto and takes a few minutes) and installs the quadlet.
 
