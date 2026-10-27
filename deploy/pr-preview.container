@@ -1,0 +1,29 @@
+# Podman quadlet for the rootless PR preview container.
+# setup.sh installs it as ~preview/.config/containers/systemd/pr-preview.container,
+# replacing @APP_DIR@ with the location of this repository.
+[Unit]
+Description=Quarto PR previews (GitHub webhook + builds)
+
+[Container]
+ContainerName=pr-preview
+Image=localhost/pr-preview:latest
+EnvironmentFile=@APP_DIR@/config.env
+PublishPort=127.0.0.1:9000:9000
+Volume=/var/www/previews:/var/www/previews
+Volume=/srv/pr-preview:/srv/pr-preview
+Volume=@APP_DIR@/secrets:/secrets:ro
+# Container uid/gid 10001 = the host user running this unit
+UserNS=keep-id:uid=10001,gid=10001
+# Reaps the processes Quarto leaves behind when a build is killed
+RunInit=true
+ReadOnly=true
+Tmpfs=/tmp:exec,mode=1777
+DropCapability=ALL
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

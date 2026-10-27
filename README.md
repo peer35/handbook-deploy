@@ -8,7 +8,8 @@ Quarto site repository is rendered on an Ubuntu/nginx server and published at
 PR opened / pushed / closed
    │  GitHub webhook (HTTPS, HMAC-signed)
    ▼
-nginx (host)  /_hooks/github ──► 127.0.0.1:9000 ──► container "pr-preview"
+nginx (host)  /_hooks/github ──► 127.0.0.1:9000 ──► rootless Podman container "pr-preview"
+                                                     (systemd user service of user "preview")
                                                      Flask app (waitress, one process)
                                                      verifies signature, replies 202, queues a job
                                                      │
@@ -28,12 +29,19 @@ The server only needs HTTPS inbound. GitHub Actions is not involved. Quarto, git
 and the Flask app all run inside the container. nginx runs on the host and serves
 the rendered previews and logs straight from disk.
 
+**The container runs rootless** under an unprivileged `preview` user. A build runs the
+PR's own code (Quarto filters and code cells), so even a container escape would only
+reach that user. On top of that, the container has a read-only filesystem, drops all
+capabilities and sets `no-new-privileges`.
+
 ## Files
 
 | Path | Purpose |
 |---|---|
-| `Dockerfile` | Image: Python 3.12, Quarto (`QUARTO_VERSION`), git, rsync, the app. Target `test` runs the tests. |
-| `compose.yaml` | Runs the container with a read-only filesystem and all capabilities dropped. Publishes `127.0.0.1:9000` and mounts the host directories. |
+| `Containerfile` | Image: Python 3.12, Quarto (`QUARTO_VERSION`), git, rsync, the app. Target `test` runs the tests. |
+| `deploy/pr-preview.container` | Podman quadlet: the systemd user service that runs the container, with its hardening, mounts and port |
+| `previewctl` | Build, test, start/stop and logs, run as the `preview` user |
+| `setup.sh` | Host setup: Podman, the `preview` user, nginx, certbot, directories, `config.env`, image, quadlet |
 | `pr_preview/web.py` | Flask app: the webhook endpoint |
 | `pr_preview/previewer.py` | Job queue, cancelling superseded builds, PR comment, reconcile loop |
 | `pr_preview/github.py` | GitHub REST calls: token or GitHub App authentication |
@@ -41,18 +49,24 @@ the rendered previews and logs straight from disk.
 | `bin/pr-preview` | Build script: `deploy <pr> <sha>` / `remove <pr>` |
 | `nginx/pr-previews.conf` | Host nginx site: previews, logs, webhook proxy |
 | `config.env.example` | Settings and secrets. Copied to `config.env`, which is not committed. |
-| `setup.sh` | Host setup: Docker, nginx, certbot, directories, `config.env` |
 | `tests/` | End-to-end tests of the app with a fake GitHub and a stub build |
 
-Host directories, owned by uid/gid 10001 (the container user):
-- `/var/www/previews/`: one folder per PR, plus `_logs/`.
+### Host directories
+These are owned by the `preview` user. The quadlet's `UserNS=keep-id` maps the
+container user (uid 10001) to `preview`.
+- `/var/www/previews/`: one folder per PR, plus `_logs/`. nginx reads it.
 - `/srv/pr-preview/`:
   - `repo.git`: the bare mirror.
   - `work/<pr>`: one git worktree per PR.
   - `state/<pr>.built`: the last commit built for each PR.
   - `home/`: Quarto's cache.
+- `~preview/.config/containers/systemd/pr-preview.container`: the installed quadlet.
+- The image is in `preview`'s own Podman storage. Rootless images are per user, so
+  `sudo podman images` won't show it. Use `previewctl`.
 
 ## Setup
+
+**Requirements:** Ubuntu 24.04 or newer. Quadlets need Podman 4.4+, and Ubuntu 24.04 ships 4.9.
 
 ### 1. DNS
 Point a hostname (for example `previews.example.org`) at the server, and open ports 80 and 443.
@@ -65,23 +79,25 @@ sudo git clone <this repo> /opt/pr-preview && cd /opt/pr-preview
 sudo PREVIEW_HOST=previews.example.org CERTBOT_EMAIL=you@example.org ./setup.sh
 ```
 
-This installs nginx, certbot and Docker (`docker.io`, unless Docker is already
-installed). It also creates the directories, the nginx site, the TLS certificate and a
-`config.env` with a random webhook secret.
+The script:
+1. Installs Podman, nginx and certbot.
+2. Creates the `preview` user, with subordinate uids and lingering enabled so its
+   services start at boot.
+3. Creates the directories, the nginx site and the TLS certificate.
+4. Writes a `config.env` with a random webhook secret.
+5. Builds the image (this downloads Quarto and takes a few minutes) and installs the quadlet.
 
 ### 3. GitHub token
 Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
 - **Repository access:** only the site repository.
 - **Permissions:** *Pull requests* read and write, and *Commit statuses* read and write.
 
-Put the token in `config.env` as `GITHUB_TOKEN=…`, then start the container:
+Put the token in `config.env` as `GITHUB_TOKEN=…`, then start the service:
 
 ```bash
-sudo docker compose up -d --build
-sudo docker compose logs -f
+sudo ./previewctl restart
+sudo ./previewctl logs -f
 ```
-
-The first build of the image downloads Quarto and takes a few minutes.
 
 ### 4. Webhook
 In the repository, go to **Settings → Webhooks → Add webhook** and set:
@@ -108,28 +124,38 @@ GitHub sends a `ping` straight away. The *Recent Deliveries* tab should show a 2
 - **Reconcile:** this runs at startup and then every `RECONCILE_INTERVAL` seconds (default
   1 hour). It builds any open PR whose head commit was never built, and removes previews
   of PRs that are closed. GitHub does not retry failed webhook deliveries, so this is the
-  safety net for downtime and container restarts. A commit that failed to build is not
-  retried automatically. Push again, or re-deliver the webhook from GitHub.
+  safety net for downtime and restarts. A commit that failed to build is not retried
+  automatically. Push again, or re-deliver the webhook from GitHub.
 - **Who gets a preview:** PRs from branches in the repository itself, or opened by an
   `OWNER`, `MEMBER` or `COLLABORATOR` (`ALLOWED_ASSOCIATIONS`). For other fork PRs the
-  service posts a "preview skipped" comment, because rendering runs the PR's code
-  (Lua filters and code cells).
+  service posts a "preview skipped" comment.
 - **`site-url`:** each build renders with a generated Quarto profile (`QUARTO_PROFILE=pr-preview`)
   that sets `website.site-url` to the preview URL. Quarto already turns root-absolute links
   (`/topics.html`, `/public/...`) into relative ones, so the site works under `/<pr>/` without changes.
 - **One process only:** the app runs as a single waitress process with threads. Running builds
   are tracked in memory, which is how a new push finds and cancels the old build. Don't run more
-  than one replica, and don't switch to a multi-process server.
+  than one container, and don't switch to a multi-process server.
 
-## Testing
+## Operations
 
-Automated tests use a fake GitHub API and a stub build script, and run inside the image:
+All commands are run from the repository directory as root. `previewctl` switches to the `preview` user.
 
-```bash
-docker build --target test .
-```
+| Task | Command |
+|---|---|
+| Status | `sudo ./previewctl status` |
+| Logs | `sudo ./previewctl logs -f`, or `sudo ./previewctl logs --since today` |
+| Restart | `sudo ./previewctl restart` |
+| Update the app | `sudo git pull && sudo ./setup.sh` (rebuilds the image, reinstalls the quadlet, restarts) |
+| Update Quarto | `sudo QUARTO_VERSION=x.y.z ./previewctl build && sudo ./previewctl restart` |
+| Run the tests | `sudo ./previewctl test` |
+| Rebuild one PR | Delete `/srv/pr-preview/state/<pr>.built` and restart, or *Redeliver* the webhook in GitHub |
 
-Manual checklist against the test repository:
+The default Quarto version is set in `Containerfile` and `previewctl`. Restarting kills a
+running build, and the reconcile job at startup rebuilds it.
+
+## Testing checklist
+
+Run these against the test repository:
 
 1. Open a PR. The comment should go from ⏳ to 🔨 (with a live log link) to ✅ (with the URL), and the preview should load.
 2. Push another commit. The same comment should update, and the preview should show the change.
@@ -137,17 +163,8 @@ Manual checklist against the test repository:
 4. Push a broken `.qmd` (for example invalid YAML front matter). The comment should show ❌ with the last 30 log lines.
 5. Close the PR. `/<pr>/` should return 404 and the comment should say 🗑️.
 6. Send a delivery with a wrong secret. The response should be 401.
-7. Run `docker compose stop`, push to a PR, then `docker compose start`. The reconcile job should build the new commit.
-
-## Operations
-
-- **Logs:** `docker compose logs -f`
-- **Update the app:** `git pull && docker compose up -d --build`
-- **Update Quarto:** `QUARTO_VERSION=x.y.z docker compose build && docker compose up -d`.
-  The default version is set in `compose.yaml` and `Dockerfile`.
-- **Manual rebuild:** delete `/srv/pr-preview/state/<pr>.built` and run `docker compose restart`,
-  or use *Redeliver* on the webhook delivery in GitHub.
-- Stopping the container kills a running build. The reconcile job at the next start rebuilds it.
+7. Run `previewctl stop`, push to a PR, then `previewctl start`. The reconcile job should build the new commit.
+8. Reboot the server. The service should come back on its own, because lingering is enabled.
 
 ## Switching to a GitHub App
 
@@ -158,12 +175,12 @@ With an App, comments show up as a bot account and no personal token is needed:
    its webhook URL and secret to the values above, and install it on the repository.
 2. Save the App's private key as `secrets/app.pem`:
    ```bash
-   sudo install -m 640 -o root -g 10001 app-key.pem secrets/app.pem
+   sudo install -m 600 -o preview -g preview app-key.pem secrets/app.pem
    ```
 3. In `config.env`, clear `GITHUB_TOKEN` and set `GITHUB_APP_ID=…` and
    `GITHUB_APP_KEY_FILE=/secrets/app.pem`.
 4. Remove the repository webhook, since the App now delivers the events. Then run
-   `docker compose up -d`.
+   `sudo ./previewctl restart`.
 
 The service doesn't take over comments posted by the old token. The first build after the
 switch posts a new comment.

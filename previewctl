@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Manage the rootless pr-preview container, which runs as the "preview" user.
+# Run as root (it switches to that user) or as the preview user itself.
+#
+#   previewctl build              build the image (QUARTO_VERSION=x.y.z to change Quarto)
+#   previewctl test               build the test stage, which runs the test suite
+#   previewctl start|stop|restart|status
+#   previewctl logs [-f] [...]    journal of the service (extra args go to journalctl)
+#   previewctl reload             pick up an edited quadlet file
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+user=${PREVIEW_USER:-preview}
+uid=$(id -u "$user")
+unit=pr-preview.service
+
+as_user() {
+  local env=(XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus")
+  if [ "$(id -u)" = "$uid" ]; then
+    env "${env[@]}" "$@"
+  else
+    (cd / && sudo -u "$user" -H env "${env[@]}" "$@")
+  fi
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+  build)
+    as_user podman build --target app -t localhost/pr-preview:latest \
+      --build-arg "QUARTO_VERSION=${QUARTO_VERSION:-1.8.26}" "$here"
+    as_user podman image prune -f >/dev/null
+    ;;
+  test)
+    as_user podman build --target test "$here"
+    ;;
+  start | stop | restart | status)
+    as_user systemctl --user "$cmd" "$unit"
+    ;;
+  reload)
+    as_user systemctl --user daemon-reload
+    ;;
+  logs)
+    if [ "$(id -u)" = 0 ]; then
+      journalctl "_SYSTEMD_USER_UNIT=$unit" "_UID=$uid" "$@"
+    else
+      as_user journalctl --user -u "$unit" "$@"
+    fi
+    ;;
+  *)
+    sed -n '2,10s/^# \{0,1\}//p' "$0"
+    exit 1
+    ;;
+esac

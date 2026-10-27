@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm AS app
+FROM docker.io/library/python:3.12-slim-bookworm AS app
 
 # Quarto renders the site inside this container, so it ships git, rsync and Quarto too
 ARG QUARTO_VERSION=1.8.26
@@ -11,8 +11,8 @@ RUN apt-get update \
  && rm -rf /tmp/quarto.deb /var/lib/apt/lists/* \
  && quarto --version
 
-# Fixed uid/gid: the host directories mounted at /var/www/previews and /srv/pr-preview
-# must be owned by it (setup.sh does that)
+# Fixed uid/gid. The quadlet maps it to the host's "preview" user (UserNS=keep-id),
+# so files written to the mounted directories are owned by that user.
 RUN groupadd --gid 10001 preview \
  && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/pr-preview/home preview
 
@@ -31,7 +31,7 @@ EXPOSE 9000
 CMD ["python", "-m", "pr_preview"]
 
 
-# `docker build --target test .` runs the test suite
+# `podman build --target test .` runs the test suite
 FROM app AS test
 USER root
 RUN pip install --no-cache-dir pytest
