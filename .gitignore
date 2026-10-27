@@ -1,0 +1,4 @@
+config.env
+secrets/*
+!secrets/.gitkeep
+__pycache__/

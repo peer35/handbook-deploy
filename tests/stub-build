@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stand-in for bin/pr-preview: "renders" for STUB_SECONDS and fails for shas starting with "dead".
+set -eu
+echo "stub $* (token visible: ${GITHUB_TOKEN:-no})"
+if [ "$1" = deploy ]; then
+  for i in $(seq "${STUB_SECONDS:-4}"); do echo "rendering $i"; sleep 0.5; done
+  case $3 in dead*) echo "ERROR: something broke" >&2; exit 1 ;; esac
+  mkdir -p "$PREVIEW_ROOT/$2"
+  echo "$3" > "$PREVIEW_ROOT/$2/index.html"
+else
+  rm -rf "${PREVIEW_ROOT:?}/$2" "${WORK_ROOT:?}/work/$2"
+fi

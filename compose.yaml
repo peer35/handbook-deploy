@@ -1,0 +1,29 @@
+services:
+  pr-preview:
+    build:
+      context: .
+      target: app
+      args:
+        QUARTO_VERSION: ${QUARTO_VERSION:-1.8.26}
+    image: pr-preview:latest
+    restart: unless-stopped
+    env_file: config.env
+    ports:
+      - "127.0.0.1:9000:9000"  # only nginx on this host talks to it
+    volumes:
+      - /var/www/previews:/var/www/previews      # served by nginx on the host
+      - /srv/pr-preview:/srv/pr-preview          # git mirror, worktrees, state, Quarto cache
+      - ./secrets:/secrets:ro                    # GitHub App key (GITHUB_APP_KEY_FILE=/secrets/app.pem)
+    init: true  # reaps the processes Quarto leaves behind when a build is killed
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

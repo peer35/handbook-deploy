@@ -1,0 +1,5 @@
+.git
+config.env
+secrets
+**/__pycache__
+*.md
