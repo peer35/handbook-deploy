@@ -2,7 +2,7 @@
 # Manage the rootless pr-preview container, which runs as the "preview" user.
 # Run as root (it switches to that user) or as the preview user itself.
 #
-#   previewctl build              build the image (QUARTO_VERSION=x.y.z to change Quarto)
+#   previewctl build              build the image (Quarto version: QUARTO_VERSION in config.env)
 #   previewctl test               build the test stage, which runs the test suite
 #   previewctl start|stop|restart|status
 #   previewctl logs [-f] [...]    journal of the service (extra args go to journalctl)
@@ -23,16 +23,37 @@ as_user() {
   fi
 }
 
+# Last value of a setting in config.env (literal, like podman --env-file reads it)
+setting() {
+  [ ! -r "$here/config.env" ] || sed -n "s/^$1=//p" "$here/config.env" | tail -n 1
+}
+
+# podman pull uses these variables itself, and podman build hands them to the RUN steps
+# without storing them in the image. Both spellings: apt and curl only read http_proxy.
+build_image() {
+  local https http no name quarto env=() args=()
+  https=$(setting HTTPS_PROXY)
+  http=$(setting HTTP_PROXY)
+  no=$(setting NO_PROXY)
+  http=${http:-$https}
+  for name in HTTPS_PROXY https_proxy; do [ -z "$https" ] || env+=("$name=$https"); done
+  for name in HTTP_PROXY http_proxy; do [ -z "$http" ] || env+=("$name=$http"); done
+  for name in NO_PROXY no_proxy; do [ -z "$no" ] || env+=("$name=$no"); done
+  # Without a setting, the default in Containerfile applies
+  quarto=${QUARTO_VERSION:-$(setting QUARTO_VERSION)}
+  [ -z "$quarto" ] || args+=(--build-arg "QUARTO_VERSION=$quarto")
+  as_user env "${env[@]}" podman build "${args[@]}" "$@"
+}
+
 cmd=${1:-}
 shift || true
 case $cmd in
   build)
-    as_user podman build --target app -t localhost/pr-preview:latest \
-      --build-arg "QUARTO_VERSION=${QUARTO_VERSION:-1.8.26}" "$here"
+    build_image --target app -t localhost/pr-preview:latest "$here"
     as_user podman image prune -f >/dev/null
     ;;
   test)
-    as_user podman build --target test "$here"
+    build_image --target test "$here"
     ;;
   start | stop | restart | status)
     as_user systemctl --user "$cmd" "$unit"

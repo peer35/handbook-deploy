@@ -91,6 +91,12 @@ The script:
 4. Writes a `config.env` with a random webhook secret.
 5. Builds the image (this downloads Quarto and takes a few minutes) and installs the quadlet.
 
+**Behind a proxy:** set `HTTPS_PROXY` (and optionally `HTTP_PROXY` and `NO_PROXY`) in
+`config.env`, and re-run `setup.sh`. If `config.env` doesn't exist yet, copy it from
+`config.env.example` and fill in `PREVIEW_BASE_URL` and `WEBHOOK_SECRET`. The proxy is used
+for the image build, the GitHub API, git and Quarto. The host's `apt` has its own proxy
+settings. Pull request builds can see these values, so don't put credentials in the proxy URL.
+
 ### 3. GitHub token
 Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
 - **Repository access:** only the site repository.
@@ -150,11 +156,11 @@ All commands are run from the repository directory as root. `previewctl` switche
 | Logs | `sudo ./previewctl logs -f`, or `sudo ./previewctl logs --since today` |
 | Restart | `sudo ./previewctl restart` |
 | Update the app | `sudo git pull && sudo ./setup.sh` (rebuilds the image, reinstalls the quadlet, restarts) |
-| Update Quarto | `sudo QUARTO_VERSION=x.y.z ./previewctl build && sudo ./previewctl restart` |
+| Update Quarto | Set `QUARTO_VERSION` in `config.env`, then `sudo ./previewctl build && sudo ./previewctl restart` |
 | Run the tests | `sudo ./previewctl test` |
 | Rebuild one PR | Delete `/srv/pr-preview/state/<pr>.built` and restart, or *Redeliver* the webhook in GitHub |
 
-The default Quarto version is set in `Containerfile` and `previewctl`. Restarting kills a
+Without `QUARTO_VERSION` in `config.env`, the default in `Containerfile` is used. Restarting kills a
 running build, and the reconcile job at startup rebuilds it.
 
 ## Testing checklist

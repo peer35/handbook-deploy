@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 LOG_NAME_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{7}\.log$")
+PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy")
 VIEWER_HTML = Path(__file__).parent / "static" / "view.html"
 
 
@@ -129,7 +130,10 @@ class Previewer:
     # --- running --------------------------------------------------------
 
     def _build_env(self):
+        # git, and anything the render downloads, must go through the proxy too
+        proxy = {name: os.environ[name] for name in PROXY_VARS if os.environ.get(name)}
         return {
+            **proxy,
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HOME": os.environ.get("HOME", str(self.cfg.work_root / "home")),
             "LANG": "C.UTF-8",
