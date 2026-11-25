@@ -1,7 +1,7 @@
 FROM docker.io/library/python:3.12-slim-bookworm AS app
 
 # Quarto renders the site inside this container, so it ships git, rsync and Quarto too
-ARG QUARTO_VERSION=1.8.26
+ARG QUARTO_VERSION=1.11.9
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git rsync \
  && arch=$(dpkg --print-architecture) \
