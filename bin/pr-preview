@@ -40,6 +40,8 @@ do_deploy() {
   (
     flock 8
     [ -d "$mirror" ] || git clone --bare --quiet "$REPO_URL" "$mirror"
+    # Follow REPO_URL if it changed (e.g. the repository moved) since the mirror was cloned.
+    git -C "$mirror" remote set-url origin "$REPO_URL"
     git -C "$mirror" fetch --quiet --force origin "+refs/pull/$pr/head:refs/pull/$pr/head"
     git -C "$mirror" merge-base --is-ancestor "$sha" "refs/pull/$pr/head" 2>/dev/null \
       || die "commit $sha is not part of pull/$pr/head"
