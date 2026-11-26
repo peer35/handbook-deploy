@@ -1,6 +1,6 @@
 # Quarto PR previews on your own server
 
-A self-hosted replacement for Netlify deploy previews. Every pull request on the
+A self-hosted replacement for Netlify deploy previews for the RDM Handbook. Every pull request on the
 Quarto site repository is rendered on an Ubuntu/nginx server and published at
 `https://<host>/<pr-number>/`. The preview is removed when the PR is closed.
 
@@ -29,10 +29,7 @@ The server only needs HTTPS inbound. GitHub Actions is not involved. Quarto, git
 and the Flask app all run inside the container. nginx runs on the host and serves
 the rendered previews and logs straight from disk.
 
-**The container runs rootless** under an unprivileged `preview` user. A build runs the
-PR's own code (Quarto filters and code cells), so even a container escape would only
-reach that user. On top of that, the container has a read-only filesystem, drops all
-capabilities and sets `no-new-privileges`.
+**The container runs rootless** under an unprivileged `preview` user. 
 
 ## Files
 
@@ -66,8 +63,6 @@ container user (uid 10001) to `preview`.
 
 ## Setup
 
-**Requirements:** Ubuntu 24.04 or newer. Quadlets need Podman 4.4+, and Ubuntu 24.04 ships 4.9.
-
 ### 1. DNS and TLS
 Point a hostname (for example `previews.example.org`) at the server. TLS is not set up by
 this repository. Provide it the way your environment handles certificates, either in
@@ -91,32 +86,30 @@ The script:
 4. Writes a `config.env` with a random webhook secret.
 5. Builds the image (this downloads Quarto and takes a few minutes) and installs the quadlet.
 
-**Behind a proxy:** set `HTTPS_PROXY` (and optionally `HTTP_PROXY` and `NO_PROXY`) in
-`config.env`, and re-run `setup.sh`. If `config.env` doesn't exist yet, copy it from
-`config.env.example` and fill in `PREVIEW_BASE_URL` and `WEBHOOK_SECRET`. The proxy is used
-for the image build, the GitHub API, git and Quarto. The host's `apt` has its own proxy
-settings. Pull request builds can see these values, so don't put credentials in the proxy URL.
+**Behind a proxy:** set `HTTPS_PROXY` if needed.
 
-### 3. GitHub token
-Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
-- **Repository access:** only the site repository.
-- **Permissions:** *Pull requests* read and write, and *Commit statuses* read and write.
+### 3. GitHub App
+The service authenticates as a GitHub App, so comments show up as a bot account. The App
+also delivers the webhook events.
 
-Put the token in `config.env` as `GITHUB_TOKEN=…`, then start the service:
+1. [Create a GitHub App](https://github.com/settings/apps/new) with:
+   - **Webhook URL:** `https://previews.example.org/_hooks/github`
+   - **Webhook secret:** the `WEBHOOK_SECRET` from `config.env` (`setup.sh` prints it)
+   - **Permissions:** *Pull requests* read and write, *Commit statuses* read and write,
+     *Metadata* read.
+   - **Subscribe to events:** **Pull request**.
+2. Generate a private key for the App and save it as `secrets/app.pem`:
+   ```bash
+   sudo install -m 600 -o preview -g preview app-key.pem secrets/app.pem
+   ```
+3. In `config.env`, set `GITHUB_APP_ID=…` and `GITHUB_APP_KEY_FILE=/secrets/app.pem`.
+4. Install the App on the site repository, then start the service:
+   ```bash
+   sudo ./previewctl restart
+   sudo ./previewctl logs -f
+   ```
 
-```bash
-sudo ./previewctl restart
-sudo ./previewctl logs -f
-```
-
-### 4. Webhook
-In the repository, go to **Settings → Webhooks → Add webhook** and set:
-- **Payload URL:** `https://previews.example.org/_hooks/github`
-- **Content type:** `application/json`
-- **Secret:** the `WEBHOOK_SECRET` from `config.env` (`setup.sh` prints it)
-- **Events:** "Let me select individual events", then tick **Pull requests** only.
-
-GitHub sends a `ping` straight away. The *Recent Deliveries* tab should show a 200 response.
+In the App's **Advanced** tab, *Recent Deliveries* should show a 200 response for the events.
 
 ## Behaviour
 
@@ -176,29 +169,3 @@ Run these against the test repository:
 7. Run `previewctl stop`, push to a PR, then `previewctl start`. The reconcile job should build the new commit.
 8. Reboot the server. The service should come back on its own, because lingering is enabled.
 
-## Switching to a GitHub App
-
-With an App, comments show up as a bot account and no personal token is needed:
-
-1. Create a GitHub App with these permissions: *Pull requests* read and write, *Commit
-   statuses* read and write, *Metadata* read. Subscribe it to **Pull request** events, set
-   its webhook URL and secret to the values above, and install it on the repository.
-2. Save the App's private key as `secrets/app.pem`:
-   ```bash
-   sudo install -m 600 -o preview -g preview app-key.pem secrets/app.pem
-   ```
-3. In `config.env`, clear `GITHUB_TOKEN` and set `GITHUB_APP_ID=…` and
-   `GITHUB_APP_KEY_FILE=/secrets/app.pem`.
-4. Remove the repository webhook, since the App now delivers the events. Then run
-   `sudo ./previewctl restart`.
-
-The service doesn't take over comments posted by the old token. The first build after the
-switch posts a new comment.
-
-## Limits
-
-- **Public repositories only:** the mirror is cloned anonymously over HTTPS. A private
-  repository needs credentials for git inside the container.
-- **Logs are public:** they are as public as the previews themselves. No secrets reach the
-  build, because the build script gets a minimal environment without the GitHub token.
-  Add basic auth to the nginx server block if the previews themselves should be private.
